@@ -264,44 +264,50 @@ atau (menggunakan produk terakhir dicari):
 
 ### Error: "Failed to launch the browser process!" - libatk-1.0.so.0
 
-**Penyebab**: Puppeteer membutuhkan library sistem untuk Chromium
+**Penyebab**: Puppeteer membutuhkan library sistem untuk Chromium, atau Chromium bundled corrupt
 
-**Solusi Cepat (Recommended)**:
+**✅ SOLUSI PALING EFEKTIF (Tested)**:
 
 ```bash
-# Ubuntu 20.04 / 22.04 LTS
-sudo apt-get update && sudo apt-get install -y \
-  chromium-browser \
-  libgbm-dev \
-  libxss1 \
-  libcups2 \
-  libdbus-1-3 \
-  libxkbcommon0 \
-  libxcomposite1 \
-  libxdamage1 \
-  libxext6 \
-  libxfixes3 \
-  libxrandr2 \
-  libxrender1 \
-  libxtst6 \
-  fonts-liberation \
-  libnss3 \
-  libxinerama1 \
-  libxi6 \
-  ca-certificates \
-  fonts-dejavu-core
+# Step 1: Update system & install Chromium dari repo
+sudo apt-get update
+sudo apt-get install -y chromium-browser
 
-# Reinstall bot & restart
+# Step 2: Bersihkan Chromium bundled yang corrupt
+cd /home/ubuntu/bot
+rm -rf node_modules/puppeteer-core/.local-chromium
+
+# Step 3: Reinstall & set env untuk gunakan system Chromium
+npm install
+export CHROME_PATH=/usr/bin/chromium-browser
+
+# Step 4: Restart bot
+pm2 restart whatsapp-bot
+
+# Cek logs untuk confirm
+pm2 logs whatsapp-bot
+```
+
+**Alternatif: Jika masih error, skip install Chromium bundled**:
+
+```bash
+# Set environment variable permanent di .bashrc
+echo 'export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true' >> ~/.bashrc
+echo 'export CHROME_PATH=/usr/bin/chromium-browser' >> ~/.bashrc
+source ~/.bashrc
+
+# Reinstall
 cd /home/ubuntu/bot
 npm install
 pm2 restart whatsapp-bot
 ```
 
-**Jika masih error, coba Alternative Install**:
+**Jika error persisten, gunakan cara manual dengan semua dependencies**:
 
 ```bash
-# Opsi 1: Install semua dependencies sekaligus (lebih lengkap)
+# Install ALL chromium dependencies (comprehensive)
 sudo apt-get install -y \
+  chromium-browser \
   gconf-service \
   libxext6 \
   libxfixes3 \
@@ -319,37 +325,29 @@ sudo apt-get install -y \
   libxcomposite1 \
   libxdamage1 \
   ca-certificates \
-  wget
+  libatk-1.0-0 \
+  libatk-bridge2.0-0 \
+  libcairo-gobject2 \
+  libgbm-dev \
+  libpango-1.0-0 \
+  libpangocairo-1.0-0 \
+  libxinerama1
 
-# Opsi 2: Gunakan script resmi Puppeteer (paling aman)
-sudo npx puppeteer browsers install chrome
+# Reinstall bot
+cd /home/ubuntu/bot
+npm cache clean --force
+rm -rf node_modules
 npm install
 pm2 restart whatsapp-bot
 ```
 
-**Jika masih gagal, skip Chromium local dan gunakan system Chromium**:
+**Opsi Terakhir: Skip bundled Puppeteer, install custom**:
 
 ```bash
-# Install Chromium dari repo
-sudo apt-get install -y chromium-browser
-
-# Update bot.js untuk gunakan system Chromium
-# Di bot.js, ubah Client initialization menjadi:
-# const client = new Client({
-#   session: 'whatsapp-session',
-#   executablePath: '/usr/bin/chromium-browser',
-#   headless: true,
-#   args: ['--no-sandbox', '--disable-setuid-sandbox']
-# });
-
-pm2 restart whatsapp-bot
-```
-
-**Atau disable Puppeteer dan gunakan Playwright** (alternatif):
-
-```bash
-npm uninstall whatsapp-web.js
-npm install whatsapp-web.js@latest --save
+# Gunakan system Chromium saja
+cd /home/ubuntu/bot
+export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+export CHROME_PATH=/usr/bin/chromium-browser
 npm install
 pm2 restart whatsapp-bot
 ```

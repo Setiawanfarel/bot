@@ -232,8 +232,30 @@ async function sendProductInfo(msg, product, client) {
   }
 }
 
-// Initialize WhatsApp client
-const client = new Client({ session: 'whatsapp-session' });
+// Initialize WhatsApp client with optimized puppeteer settings for VPS
+const client = new Client({
+  session: 'whatsapp-session',
+  puppeteer: {
+    headless: 'new',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-default-apps',
+      '--disable-sync',
+      '--disable-extensions',
+      '--disable-plugins',
+      '--disable-web-resources',
+      '--metrics-recording-only',
+      '--disable-breakpad'
+    ],
+    // Try to use system chromium first, fallback to bundled
+    executablePath: process.env.CHROME_PATH || '/usr/bin/chromium-browser'
+  }
+});
 
 // Display QR code for login
 client.on('qr', (qr) => {
