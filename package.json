@@ -5,6 +5,7 @@
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
+    "start:baileys": "node bot-baileys.js",
     "dev": "nodemon bot.js",
     "import": "node import-to-db.js",
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -22,6 +23,7 @@
   "license": "MIT",
   "dependencies": {
     "whatsapp-web.js": "^1.34.2",
+    "@adiwajshing/baileys": "^4.5.2",
     "qrcode-terminal": "^0.12.0",
     "dotenv": "^16.6.1",
     "bwip-js": "^4.8.0",
