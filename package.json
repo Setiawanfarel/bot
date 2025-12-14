@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node bot.js",
     "dev": "nodemon bot.js",
+    "import": "node import-to-db.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
@@ -25,7 +26,8 @@
     "dotenv": "^16.6.1",
     "bwip-js": "^4.8.0",
     "sharp": "^0.34.5",
-    "node-fetch": "^2.7.0"
+    "node-fetch": "^2.7.0",
+    "sqlite3": "^5.1.6"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"

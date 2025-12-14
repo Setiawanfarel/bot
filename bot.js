@@ -5,24 +5,55 @@ const path = require('path');
 require('dotenv').config();
 const bwipjs = require('bwip-js');
 const sharp = require('sharp');
+const sqlite3 = require('sqlite3').verbose();
 
-// Load barcode data lokal
-let barcodeData = [];
-let pluMap = new Map();
-let barcodeMap = new Map();
+// Database connection
+const dbPath = path.join(__dirname, 'barcode.db');
+let db = null;
 
-try {
-  const dataPath = path.join(__dirname, 'barcodesheet.json');
-  barcodeData = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
-  
-  barcodeData.forEach(item => {
-    if (item.plu) pluMap.set(item.plu, item);
-    if (item.barcode) barcodeMap.set(item.barcode, item);
+// Initialize database
+function initializeDB() {
+  return new Promise((resolve, reject) => {
+    db = new sqlite3.Database(dbPath, (err) => {
+      if (err) {
+        console.error('❌ Database error:', err);
+        reject(err);
+      } else {
+        console.log('✅ Database connected');
+        resolve();
+      }
+    });
   });
-  
-  console.log(`✅ Loaded ${barcodeData.length} local barcode records`);
-} catch (error) {
-  console.error('❌ Error loading barcodesheet.json:', error);
+}
+
+// Query helper
+function queryDB(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    if (!db) {
+      reject(new Error('Database not initialized'));
+      return;
+    }
+    
+    db.get(sql, params, (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+}
+
+// Query all helper
+function queryAllDB(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    if (!db) {
+      reject(new Error('Database not initialized'));
+      return;
+    }
+    
+    db.all(sql, params, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows || []);
+    });
+  });
 }
 
 // Barcode cache
@@ -30,7 +61,23 @@ const barcodeCache = new Map();
 const lastProductByChat = new Map();
 
 function findProductLocally(query) {
-  return pluMap.get(query) || barcodeMap.get(query) || null;
+  return new Promise(async (resolve) => {
+    try {
+      // Try PLU first
+      let product = await queryDB('SELECT * FROM products WHERE plu = ?', [query]);
+      if (product) {
+        resolve(product);
+        return;
+      }
+      
+      // Try barcode
+      product = await queryDB('SELECT * FROM products WHERE barcode = ?', [query]);
+      resolve(product || null);
+    } catch (err) {
+      console.error('❌ DB query error:', err);
+      resolve(null);
+    }
+  });
 }
 
 function esc(s) {
@@ -246,7 +293,7 @@ client.on('message', async (msg) => {
 
       const results = [];
       for (const plu of pluList) {
-        const product = findProductLocally(plu);
+        const product = await findProductLocally(plu);
         if (product) {
           results.push(`✅ ${plu}: ${product.productName || product.nama}`);
         } else {
@@ -269,7 +316,7 @@ client.on('message', async (msg) => {
 
       let product = null;
       if (parts[1]) {
-        product = findProductLocally(parts[1]);
+        product = await findProductLocally(parts[1]);
       } else {
         product = lastProductByChat.get(msg.from);
       }
@@ -292,7 +339,7 @@ client.on('message', async (msg) => {
     }
 
     // Default: search lokal
-    const product = findProductLocally(userMessage);
+    const product = await findProductLocally(userMessage);
     if (product) {
       await sendBarcodeInfo(msg, product, client);
     } else {
@@ -312,7 +359,16 @@ client.on('error', (error) => {
   console.error('❌ Error:', error);
 });
 
-client.initialize();
+// Initialize and start
+(async () => {
+  try {
+    await initializeDB();
+    client.initialize();
+  } catch (err) {
+    console.error('❌ Initialization failed:', err);
+    process.exit(1);
+  }
+})();
 
 process.on('SIGINT', () => {
   console.log('\n👋 Shutting down...');
