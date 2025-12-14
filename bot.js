@@ -6,10 +6,19 @@ require('dotenv').config();
 const bwipjs = require('bwip-js');
 const sharp = require('sharp');
 
-// safe fetch: use global fetch if available, otherwise dynamically import node-fetch
-const fetchFunc = (...args) => {
-  if (typeof globalThis.fetch === 'function') return globalThis.fetch(...args);
-  return import('node-fetch').then(m => m.default(...args));
+// safe fetch with User-Agent header to avoid 403 errors
+const fetchFunc = async (url, options = {}) => {
+  const defaultHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    ...options.headers
+  };
+  const finalOptions = { ...options, headers: defaultHeaders };
+  
+  if (typeof globalThis.fetch === 'function') {
+    return globalThis.fetch(url, finalOptions);
+  }
+  const m = await import('node-fetch');
+  return m.default(url, finalOptions);
 };
 
 // URL API dari environment variables
@@ -73,7 +82,7 @@ async function createCombinedImage(product, options = {}) {
   const targetWidth = options.targetWidth || 1000;
   const sidePadding = options.sidePadding || 60;
   const barcodeScale = options.barcodeScale || 2;
-  const barcodeHeight = options.barcodeHeight || 15;
+  const barcodeHeight = options.barcodeHeight || 10;
 
   const plu = product.plu || 'N/A';
   const barcode = product.barcode || '';
@@ -94,29 +103,38 @@ async function createCombinedImage(product, options = {}) {
   
   // Parallel: fetch image + generate barcode (if not cached)
   const [prodBuf] = await Promise.all([
-    // Fetch product image with timeout and fallback
+    // Fetch product image with timeout and fallback (with retry)
     (async () => {
       if (!gambar || gambar.trim() === '') {
         console.log('⚠️ No image URL provided, using blank fallback');
         return null;
       }
-      try {
-        const res = await fetchFunc(gambar, { timeout: 8000 });
-        if (res && res.ok) {
-          if (typeof res.arrayBuffer === 'function') {
-            const ab = await res.arrayBuffer();
-            return Buffer.from(ab);
-          } else if (typeof res.buffer === 'function') {
-            return await res.buffer();
+      
+      // Retry logic for 403 and timeout errors
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const res = await fetchFunc(gambar, { timeout: 8000 });
+          if (res && res.ok) {
+            if (typeof res.arrayBuffer === 'function') {
+              const ab = await res.arrayBuffer();
+              return Buffer.from(ab);
+            } else if (typeof res.buffer === 'function') {
+              return await res.buffer();
+            }
+          } else if (res && res.status === 403) {
+            console.log(`⚠️ Image fetch 403 (attempt ${attempt}/2), retrying...`);
+            if (attempt === 1) continue;  // retry once
+            return null;
+          } else {
+            console.log(`⚠️ Image fetch failed with status ${res && res.status}`);
+            return null;
           }
-        } else {
-          console.log(`⚠️ Image fetch failed with status ${res && res.status}`);
-          return null;
+        } catch (e) {
+          console.log(`⚠️ Image fetch error (attempt ${attempt}/2): ${e && e.message}`);
+          if (attempt === 2) return null;
         }
-      } catch (e) {
-        console.log(`⚠️ Image fetch error: ${e && e.message}`);
-        return null;
       }
+      return null;
     })(),
     
     // Generate barcode (or use cache)
@@ -216,7 +234,7 @@ async function generateBulkImage(product, qty) {
   const productHeight = 220;
   const sidePadding = 20;
   const barcodeScale = 2;
-  const barcodeHeight = 15;
+  const barcodeHeight = 10;
 
   // Parallel fetch image + prepare barcode
   const codeToRender = (product.barcode && product.barcode.trim() !== '') ? product.barcode : (product.plu || '000000');
@@ -230,22 +248,33 @@ async function generateBulkImage(product, qty) {
 
   const gambar = product.imageUrl || product.gambar || '';
   
-  // Parallel: fetch image + barcode generation
+  // Parallel: fetch image + barcode generation (with retry for 403)
   const [prodBuf] = await Promise.all([
     (async () => {
       if (!gambar || gambar.trim() === '') return null;
-      try {
-        const res = await fetchFunc(gambar, { timeout: 8000 });
-        if (res && res.ok) {
-          if (typeof res.arrayBuffer === 'function') {
-            const ab = await res.arrayBuffer();
-            return Buffer.from(ab);
-          } else if (typeof res.buffer === 'function') {
-            return await res.buffer();
+      
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const res = await fetchFunc(gambar, { timeout: 8000 });
+          if (res && res.ok) {
+            if (typeof res.arrayBuffer === 'function') {
+              const ab = await res.arrayBuffer();
+              return Buffer.from(ab);
+            } else if (typeof res.buffer === 'function') {
+              return await res.buffer();
+            }
+          } else if (res && res.status === 403) {
+            console.log(`⚠️ Bulk: Image fetch 403 (attempt ${attempt}/2), retrying...`);
+            if (attempt === 1) continue;
+            return null;
+          } else {
+            console.log(`⚠️ Bulk: Image fetch failed with status ${res && res.status}`);
+            return null;
           }
+        } catch (e) {
+          console.log(`⚠️ Bulk: Image fetch error (attempt ${attempt}/2): ${e.message}`);
+          if (attempt === 2) return null;
         }
-      } catch (e) {
-        console.log(`⚠️ Bulk image fetch error: ${e.message}`);
       }
       return null;
     })(),
@@ -320,7 +349,7 @@ async function generateBulkImage(product, qty) {
 // Fungsi untuk menangani balasan (single product)
 async function sendProductInfo(msg, product, client) {
   try {
-    const finalImageBuffer = await createCombinedImage(product, { barcodeHeight: 15 });
+    const finalImageBuffer = await createCombinedImage(product, { barcodeHeight: 10 });
     const media = new MessageMedia('image/png', finalImageBuffer.toString('base64'), 'product-with-barcode.png');
     const caption = `Harga tidak tersedia!\n\n*PLU:* ${product.plu || 'N/A'}\n\nUNTUK MEMBUAT BARCODE DENGAN JUMLAH BANYAK.\nSILAHKAN KETIK .BULK`;
 
