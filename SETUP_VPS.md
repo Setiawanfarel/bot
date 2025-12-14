@@ -120,7 +120,91 @@ pm2 restart whatsapp-bot
 
 ---
 
-## Cara Menggunakan Bot
+## 🔧 Automated Setup Script (Recommended)
+
+Jika setup manual rumit, gunakan script otomatis ini:
+
+```bash
+# Download dan jalankan setup script
+cd /home/ubuntu
+wget https://raw.githubusercontent.com/Setiawanfarel/bot/main/install.sh -O install.sh
+chmod +x install.sh
+./install.sh
+```
+
+Atau manual script di VPS:
+
+```bash
+#!/bin/bash
+set -e
+
+echo "🚀 Installing WhatsApp Bot Dependencies..."
+
+# Update system
+sudo apt-get update
+echo "✅ System updated"
+
+# Install Node.js dependencies
+sudo apt-get install -y curl git build-essential python3
+echo "✅ Build tools installed"
+
+# Install Chromium dependencies
+sudo apt-get install -y \
+  chromium-browser \
+  libgbm-dev \
+  libxss1 \
+  libcups2 \
+  libdbus-1-3 \
+  libxkbcommon0 \
+  libxcomposite1 \
+  libxdamage1 \
+  libxext6 \
+  libxfixes3 \
+  libxrandr2 \
+  libxrender1 \
+  libxtst6 \
+  fonts-liberation \
+  libnss3 \
+  libxinerama1 \
+  libxi6 \
+  ca-certificates \
+  fonts-dejavu-core
+echo "✅ Chromium dependencies installed"
+
+# Clone repository
+if [ ! -d "bot" ]; then
+  git clone https://github.com/Setiawanfarel/bot.git
+fi
+cd bot
+
+# Install Node modules
+npm install
+echo "✅ Node modules installed"
+
+# Setup environment
+if [ ! -f ".env" ]; then
+  cp .env.example .env
+  echo "✅ .env created"
+fi
+
+# Install PM2 globally
+sudo npm install -g pm2
+echo "✅ PM2 installed"
+
+# Start bot with PM2
+pm2 start bot.js --name "whatsapp-bot"
+pm2 save
+sudo pm2 startup
+echo "✅ Bot started with PM2"
+
+echo ""
+echo "🎉 Setup Complete!"
+echo "📱 Scan QR code yang muncul dengan WhatsApp"
+echo "📊 Monitor: pm2 monit"
+echo "📋 Logs: pm2 logs whatsapp-bot"
+```
+
+---
 
 ### 1. Cari Produk Lokal (Default)
 
@@ -182,15 +266,14 @@ atau (menggunakan produk terakhir dicari):
 
 **Penyebab**: Puppeteer membutuhkan library sistem untuk Chromium
 
-**Solusi**:
+**Solusi Cepat (Recommended)**:
 
 ```bash
-# Install dependencies Chromium di Ubuntu/Debian
-sudo apt-get update
-sudo apt-get install -y \
+# Ubuntu 20.04 / 22.04 LTS
+sudo apt-get update && sudo apt-get install -y \
+  chromium-browser \
   libgbm-dev \
-  libatk-1.0-0 \
-  libatk-bridge2.0-0 \
+  libxss1 \
   libcups2 \
   libdbus-1-3 \
   libxkbcommon0 \
@@ -200,25 +283,75 @@ sudo apt-get install -y \
   libxfixes3 \
   libxrandr2 \
   libxrender1 \
-  libxss1 \
   libxtst6 \
   fonts-liberation \
-  libappindicator1 \
   libnss3 \
-  libasound2 \
   libxinerama1 \
-  libxi6
+  libxi6 \
+  ca-certificates \
+  fonts-dejavu-core
 
-# Lalu reinstall bot
+# Reinstall bot & restart
+cd /home/ubuntu/bot
 npm install
 pm2 restart whatsapp-bot
 ```
 
-Jika error berlanjut, coba dengan flag `--ignore-gpu`:
+**Jika masih error, coba Alternative Install**:
 
 ```bash
-export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=false
+# Opsi 1: Install semua dependencies sekaligus (lebih lengkap)
+sudo apt-get install -y \
+  gconf-service \
+  libxext6 \
+  libxfixes3 \
+  libxi6 \
+  libxrandr2 \
+  libxrender1 \
+  libxss1 \
+  libxtst6 \
+  fonts-liberation \
+  libnss3 \
+  libcups2 \
+  libdbus-1-3 \
+  libgconf-2-4 \
+  libxkbcommon0 \
+  libxcomposite1 \
+  libxdamage1 \
+  ca-certificates \
+  wget
+
+# Opsi 2: Gunakan script resmi Puppeteer (paling aman)
+sudo npx puppeteer browsers install chrome
 npm install
+pm2 restart whatsapp-bot
+```
+
+**Jika masih gagal, skip Chromium local dan gunakan system Chromium**:
+
+```bash
+# Install Chromium dari repo
+sudo apt-get install -y chromium-browser
+
+# Update bot.js untuk gunakan system Chromium
+# Di bot.js, ubah Client initialization menjadi:
+# const client = new Client({
+#   session: 'whatsapp-session',
+#   executablePath: '/usr/bin/chromium-browser',
+#   headless: true,
+#   args: ['--no-sandbox', '--disable-setuid-sandbox']
+# });
+
+pm2 restart whatsapp-bot
+```
+
+**Atau disable Puppeteer dan gunakan Playwright** (alternatif):
+
+```bash
+npm uninstall whatsapp-web.js
+npm install whatsapp-web.js@latest --save
+npm install
+pm2 restart whatsapp-bot
 ```
 
 ### Error: "Cannot find module 'whatsapp-web.js'"
