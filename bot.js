@@ -81,7 +81,15 @@ async function findProductLocally(query) {
     // Try PLU first
     let product = await queryDB('SELECT * FROM products WHERE plu = ?', [key]);
     if (!product) {
+      // try barcode exact
       product = await queryDB('SELECT * FROM products WHERE barcode = ?', [key]);
+    }
+    // If still not found, try digits-only (user may send formatting characters)
+    if (!product) {
+      const digits = key.replace(/\D/g, '');
+      if (digits && digits !== key) {
+        product = await queryDB('SELECT * FROM products WHERE plu = ? OR barcode = ?', [digits, digits]);
+      }
     }
     const elapsed = Date.now() - t0;
     if (elapsed > 10) console.log(`🔎 Lookup for ${key} took ${elapsed}ms`);
@@ -94,7 +102,7 @@ async function findProductLocally(query) {
         productCache.delete(oldestKey);
       }
     }
-
+    if (!product) console.log(`🔍 Lookup miss for key="${key}" (tried digits-only: ${key.replace(/\D/g,'')})`);
     return product || null;
   } catch (err) {
     console.error('❌ DB query error:', err);
