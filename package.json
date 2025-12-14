@@ -1,28 +1,41 @@
 {
   "name": "whatsapp-barcode-bot",
   "version": "1.0.0",
-  "description": "WhatsApp Bot untuk menampilkan info barcode (PLU, nama, gambar)",
+  "description": "WhatsApp Bot for generating product barcodes and bulk labels for POS systems (Indomaret compatible)",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
-    "dev": "nodemon bot.js"
+    "dev": "nodemon bot.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
     "whatsapp",
+    "barcode",
     "bot",
-    "barcode"
+    "pos",
+    "indomaret",
+    "label",
+    "bulk"
   ],
-  "author": "",
-  "license": "ISC",
+  "author": "Farel",
+  "license": "MIT",
   "dependencies": {
-    "bwip-js": "^4.8.0",
-    "dotenv": "^16.6.1",
-    "node-fetch": "^2.7.0",
+    "whatsapp-web.js": "^1.34.2",
     "qrcode-terminal": "^0.12.0",
+    "dotenv": "^16.6.1",
+    "bwip-js": "^4.8.0",
     "sharp": "^0.34.5",
-    "whatsapp-web.js": "^1.34.2"
+    "node-fetch": "^2.7.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=16.0.0",
+    "npm": ">=8.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Setiawanfarel/bot.git"
   }
 }
