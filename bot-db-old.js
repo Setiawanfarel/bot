@@ -41,6 +41,21 @@ function queryDB(sql, params = []) {
   });
 }
 
+// Query all helper
+function queryAllDB(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    if (!db) {
+      reject(new Error('Database not initialized'));
+      return;
+    }
+    
+    db.all(sql, params, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows || []);
+    });
+  });
+}
+
 // Barcode cache
 const barcodeCache = new Map();
 const lastProductByChat = new Map();
@@ -69,8 +84,13 @@ function esc(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// Create image: product image (top, big) + barcode (middle) + info (bottom)
+// Create barcode image only (no product image, no API fetch)
 async function createBarcodeImage(product, options = {}) {
+  const targetWidth = options.targetWidth || 1000;
+  const sidePadding = options.sidePadding || 60;
+  const barcodeScale = options.barcodeScale || 2;
+  const barcodeHeight = options.barcodeHeight || 10;
+
   const plu = product.plu || 'N/A';
   const barcode = product.barcode || '';
   const nama = product.productName || product.nama || 'Nama Tidak Tersedia';
@@ -91,8 +111,8 @@ async function createBarcodeImage(product, options = {}) {
       barcodePng = await bwipjs.toBuffer({
         bcid,
         text: codeToRender,
-        scale: 3,
-        height: 15,
+        scale: barcodeScale,
+        height: barcodeHeight,
         includetext: true,
         textxalign: 'center'
       });
@@ -104,62 +124,42 @@ async function createBarcodeImage(product, options = {}) {
     }
   }
 
-  // Dimension standar POS (80mm thermal printer = ~320px)
-  const width = 800;
-  const productHeight = 600;    // Gambar produk (besar)
-  const barcodeHeight = 150;    // Barcode (terlihat)
-  const infoHeight = 200;       // Informasi (keterangan)
-  const totalHeight = productHeight + barcodeHeight + infoHeight + 40;
-
-  // 1. Create blank product image (placeholder - abu-abu)
-  const productImage = await sharp({
-    create: {
-      width: width,
-      height: productHeight,
-      channels: 3,
-      background: '#e8e8e8'
-    }
-  }).png().toBuffer();
-
-  // 2. Resize barcode
-  const barcodeResized = await sharp(barcodePng)
-    .resize(width - 40, null, { withoutEnlargement: true })
-    .png()
-    .toBuffer();
-
-  // 3. Create info SVG (keterangan di bawah)
+  // Create info SVG
+  const infoHeight = 100;
   const infoSvg = `
-    <svg width="${width}" height="${infoHeight}" xmlns="http://www.w3.org/2000/svg">
-      <rect width="${width}" height="${infoHeight}" fill="#ffffff" stroke="#000" stroke-width="2"/>
-      <text x="20" y="50" font-size="36" font-weight="bold" fill="#000000">PLU: ${esc(plu)}</text>
-      <text x="20" y="100" font-size="28" fill="#333333">${esc(nama)}</text>
-      <text x="20" y="145" font-size="20" fill="#666666">Barcode: ${esc(codeToRender)}</text>
-      <text x="20" y="185" font-size="18" fill="#999999">Scan barcode di atas untuk checkout</text>
+    <svg width="${targetWidth}" height="${infoHeight}" xmlns="http://www.w3.org/2000/svg">
+      <rect width="${targetWidth}" height="${infoHeight}" fill="#ffffff" stroke="#000000" stroke-width="2"/>
+      <text x="20" y="30" font-size="20" font-weight="bold" fill="#000000">PLU: ${esc(plu)}</text>
+      <text x="20" y="60" font-size="16" fill="#333333">${esc(nama)}</text>
+      <text x="20" y="85" font-size="12" fill="#666666">Barcode: ${esc(codeToRender)}</text>
     </svg>
   `;
-
+  
   const infoPng = await sharp(Buffer.from(infoSvg)).png().toBuffer();
 
-  // 4. Composite: gambar + barcode + info
+  // Resize barcode
+  const barcodeResized = await sharp(barcodePng)
+    .resize(targetWidth - 2 * sidePadding, null, { withoutEnlargement: true })
+    .png()
+    .toBuffer();
+  
+  const barcodeMeta = await sharp(barcodeResized).metadata();
+
+  // Create final image: info + barcode
+  const totalHeight = infoHeight + barcodeMeta.height + 30;
   const canvas = sharp({
-    create: {
-      width: width,
-      height: totalHeight,
-      channels: 3,
-      background: '#ffffff'
-    }
+    create: { width: targetWidth, height: totalHeight, channels: 3, background: '#ffffff' }
   });
 
-  const final = await canvas.composite([
-    { input: productImage, top: 0, left: 0 },
-    { input: barcodeResized, top: productHeight + 15, left: 20 },
-    { input: infoPng, top: productHeight + barcodeHeight + 25, left: 0 }
+  const composite = await canvas.composite([
+    { input: infoPng, top: 0, left: 0 },
+    { input: barcodeResized, top: infoHeight + 15, left: sidePadding }
   ]).png().toBuffer();
 
-  return final;
+  return composite;
 }
 
-// Generate bulk image (multiple labels)
+// Generate bulk image (multiple barcodes)
 async function generateBulkImage(product, qty) {
   if (qty <= 0 || qty > 200) throw new Error('qty invalid');
 
@@ -180,43 +180,38 @@ async function generateBulkImage(product, qty) {
 
   if (!barcodePng) {
     barcodePng = await bwipjs.toBuffer({
-      bcid, text: codeToRender, scale: 3, height: 15, includetext: true, textxalign: 'center'
+      bcid, text: codeToRender, scale: 2, height: 10, includetext: true, textxalign: 'center'
     });
     barcodeCache.set(cacheKey, barcodePng);
   }
 
-  // Label dimensions untuk bulk (80mm thermal = 320px)
-  const labelWidth = 320;
-  const productH = 250;
-  const barcodeH = 80;
-  const infoH = 100;
-  const labelHeight = productH + barcodeH + infoH + 20;
+  // Label dimensions
+  const labelWidth = 800;
+  const infoHeight = 80;
+  const sidePadding = 20;
 
-  // Product placeholder
-  const productImg = await sharp({
-    create: { width: labelWidth, height: productH, channels: 3, background: '#e8e8e8' }
-  }).png().toBuffer();
-
-  // Barcode resized
-  const barcodeResized = await sharp(barcodePng)
-    .resize(labelWidth - 20, null, { withoutEnlargement: true })
-    .png()
-    .toBuffer();
-
-  // Info SVG
+  // Info SVG for bulk
   const infoSvg = `
-    <svg width="${labelWidth}" height="${infoH}" xmlns="http://www.w3.org/2000/svg">
-      <rect width="${labelWidth}" height="${infoH}" fill="#ffffff" stroke="#000" stroke-width="1"/>
-      <text x="8" y="28" font-size="18" font-weight="bold" fill="#000">${esc(plu)}</text>
-      <text x="8" y="55" font-size="14" fill="#333">${esc(nama.substring(0, 25))}</text>
-      <text x="8" y="80" font-size="11" fill="#666">Code: ${esc(codeToRender)}</text>
+    <svg width="${labelWidth}" height="${infoHeight}" xmlns="http://www.w3.org/2000/svg">
+      <rect width="${labelWidth}" height="${infoHeight}" fill="#ffffff" stroke="#ccc" stroke-width="1"/>
+      <text x="10" y="25" font-size="16" font-weight="bold" fill="#000">${esc(plu)} - ${esc(nama)}</text>
+      <text x="10" y="50" font-size="12" fill="#333">Code: ${esc(codeToRender)}</text>
+      <text x="10" y="70" font-size="11" fill="#666">Scan barcode di bawah</text>
     </svg>
   `;
 
   const infoPng = await sharp(Buffer.from(infoSvg)).png().toBuffer();
 
-  // Create bulk canvas
+  // Resize barcode
+  const barcodeResized = await sharp(barcodePng)
+    .resize(labelWidth - 2 * sidePadding, null, { withoutEnlargement: true })
+    .png()
+    .toBuffer();
+
+  const barcodeMeta = await sharp(barcodeResized).metadata();
+  const labelHeight = infoHeight + barcodeMeta.height + 20;
   const totalHeight = labelHeight * qty;
+
   const canvas = sharp({
     create: { width: labelWidth, height: totalHeight, channels: 3, background: '#ffffff' }
   });
@@ -224,9 +219,8 @@ async function generateBulkImage(product, qty) {
   const composites = [];
   for (let i = 0; i < qty; i++) {
     const top = i * labelHeight;
-    composites.push({ input: productImg, top: top, left: 0 });
-    composites.push({ input: barcodeResized, top: top + productH + 8, left: 10 });
-    composites.push({ input: infoPng, top: top + productH + barcodeH + 12, left: 0 });
+    composites.push({ input: infoPng, top: top, left: 0 });
+    composites.push({ input: barcodeResized, top: top + infoHeight + 10, left: sidePadding });
   }
 
   return await canvas.composite(composites).png().toBuffer();
@@ -235,11 +229,10 @@ async function generateBulkImage(product, qty) {
 // Send barcode
 async function sendBarcodeInfo(msg, product, client) {
   try {
-    await client.sendMessage(msg.from, '⏳ Membuat barcode...');
-    const buffer = await createBarcodeImage(product);
+    const buffer = await createBarcodeImage(product, { barcodeHeight: 10 });
     const media = new MessageMedia('image/png', buffer.toString('base64'), 'barcode.png');
     
-    const caption = `✅ *PLU:* ${product.plu || 'N/A'}\n*Nama:* ${product.productName || product.nama || 'N/A'}\n\n📦 Gunakan:\n• .bulk <qty> untuk banyak label\n• .plu <plu1> <plu2> untuk cari multiple`;
+    const caption = `*PLU:* ${product.plu || 'N/A'}\n*Nama:* ${product.productName || product.nama || 'N/A'}\n\nGunakan .bulk <qty> untuk membuat banyak label`;
     
     await client.sendMessage(msg.from, media, { caption });
     lastProductByChat.set(msg.from, product);
@@ -281,8 +274,8 @@ client.on('qr', (qr) => {
 
 client.on('ready', () => {
   console.log('✅ WhatsApp Bot Ready!');
-  console.log('📝 Send PLU or Barcode to search');
-  console.log('📋 Commands: .plu <plu1> <plu2> ... or .bulk <qty> <plu>');
+  console.log('Send PLU or Barcode to search');
+  console.log('Commands: .plu <plu1> <plu2> ... or .bulk <qty> <plu>');
 });
 
 // Message handler
@@ -333,11 +326,11 @@ client.on('message', async (msg) => {
         return;
       }
 
-      await client.sendMessage(msg.from, `⏳ Membuat ${qty} label...`);
+      await client.sendMessage(msg.from, `Membuat ${qty} label...`);
       try {
         const buffer = await generateBulkImage(product, qty);
         const media = new MessageMedia('image/png', buffer.toString('base64'), `bulk-${qty}.png`);
-        await client.sendMessage(msg.from, media, { caption: `✅ Bulk ${qty}x ${product.plu}` });
+        await client.sendMessage(msg.from, media, { caption: `Bulk ${qty}x ${product.plu}` });
       } catch (err) {
         console.error('❌ Bulk error:', err);
         await client.sendMessage(msg.from, '❌ Error membuat bulk');
@@ -350,7 +343,7 @@ client.on('message', async (msg) => {
     if (product) {
       await sendBarcodeInfo(msg, product, client);
     } else {
-      await client.sendMessage(msg.from, `❌ PLU/Barcode "${userMessage}" tidak ditemukan\n\nGunakan:\n• PLU: 10000019\n• Barcode: 8992702000018\n• Multiple: .plu 10000019 10000020\n• Bulk: .bulk 10 10000019`);
+      await client.sendMessage(msg.from, `❌ PLU/Barcode "${userMessage}" tidak ditemukan\n\nGunakan format:\n• PLU: 10000019\n• Barcode: 8992702000018\n• Multiple: .plu 10000019 10000020\n• Bulk: .bulk 10 10000019`);
     }
   } catch (error) {
     console.error('❌ Error:', error);
