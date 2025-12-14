@@ -178,12 +178,56 @@ atau (menggunakan produk terakhir dicari):
 
 ## Troubleshooting
 
+### Error: "Failed to launch the browser process!" - libatk-1.0.so.0
+
+**Penyebab**: Puppeteer membutuhkan library sistem untuk Chromium
+
+**Solusi**:
+
+```bash
+# Install dependencies Chromium di Ubuntu/Debian
+sudo apt-get update
+sudo apt-get install -y \
+  libgbm-dev \
+  libatk-1.0-0 \
+  libatk-bridge2.0-0 \
+  libcups2 \
+  libdbus-1-3 \
+  libxkbcommon0 \
+  libxcomposite1 \
+  libxdamage1 \
+  libxext6 \
+  libxfixes3 \
+  libxrandr2 \
+  libxrender1 \
+  libxss1 \
+  libxtst6 \
+  fonts-liberation \
+  libappindicator1 \
+  libnss3 \
+  libasound2 \
+  libxinerama1 \
+  libxi6
+
+# Lalu reinstall bot
+npm install
+pm2 restart whatsapp-bot
+```
+
+Jika error berlanjut, coba dengan flag `--ignore-gpu`:
+
+```bash
+export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=false
+npm install
+```
+
 ### Error: "Cannot find module 'whatsapp-web.js'"
 
 **Solusi**:
 
 ```bash
 npm install
+npm install whatsapp-web.js --save
 ```
 
 ### Error: "EACCES: permission denied"
@@ -203,19 +247,37 @@ npm install
 pm2 logs whatsapp-bot
 ```
 
+Lihat error terakhir di log.
+
 **Restart**:
 
 ```bash
 pm2 restart whatsapp-bot
 ```
 
-### Barcode tidak scannableError: "sharp module not found"
+### Error: "sharp module not found"
 
 **Solusi**:
 
 ```bash
-npm install --save-dev build-essential
+npm install --save-dev build-essential python3
 npm install
+```
+
+### Session tidak ter-save (perlu scan QR setiap restart)
+
+**Penyebab**: Folder session tidak writable
+
+**Solusi**:
+
+```bash
+# Pastikan folder writable
+chmod -R 755 /home/ubuntu/bot/whatsapp-session
+# atau hapus dan buat baru
+rm -rf /home/ubuntu/bot/whatsapp-session
+mkdir -p /home/ubuntu/bot/whatsapp-session
+chmod 755 /home/ubuntu/bot/whatsapp-session
+pm2 restart whatsapp-bot
 ```
 
 ---
