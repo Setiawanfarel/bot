@@ -1,49 +1,81 @@
 const bwipjs = require('bwip-js');
 const sharp = require('sharp');
 const fs = require('fs');
+const path = require('path');
+
+function esc(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
 
 async function run() {
   try {
-    const codeToRender = '8992702000018'; // contoh barcode EAN-13
-    const nama = 'Contoh Produk Test';
+    const codeToRender = '8992702000018';
+    const nama = 'Mie Instan Favorit';
     const plu = '10000019';
+
+    console.log('🎨 Testing barcode generation...');
 
     const isDigits = /^\d+$/.test(codeToRender);
     let bcid = 'code128';
     if (isDigits && codeToRender.length === 13) bcid = 'ean13';
     else if (isDigits && codeToRender.length === 12) bcid = 'upca';
 
+    console.log(`📊 Barcode type: ${bcid}`);
+
     const barcodePng = await bwipjs.toBuffer({
       bcid: bcid,
       text: codeToRender,
-      scale: 4,
-      height: 80,
+      scale: 3,
+      height: 15,
       includetext: true,
       textxalign: 'center'
     });
 
-    // Buat placeholder produk lokal (tanpa internet)
-    const targetWidth = 1000;
+    console.log('✅ Barcode generated');
+
+    // Layout POS-standard
+    const width = 800;
     const productHeight = 600;
-    const prodBuf = await sharp({ create: { width: targetWidth, height: productHeight, channels: 3, background: '#f6f6f6' } }).png().toBuffer();
-    const prodResized = await sharp(prodBuf).resize({ width: targetWidth }).png().toBuffer();
-    const prodMeta = await sharp(prodResized).metadata();
+    const barcodeHeight = 150;
+    const infoHeight = 200;
+    const totalHeight = productHeight + barcodeHeight + infoHeight + 40;
 
-    // Buat SVG info block
-    const lines = [nama, `PLU: ${plu}`];
-    const fontSize = 36;
-    const lineHeight = Math.round(fontSize * 1.4);
-    const padding = 20;
-    const infoHeight = padding * 2 + lineHeight * lines.length;
-    const svgLines = lines.map((ln, i) => `<text x="${padding}" y="${padding + lineHeight * (i + 0.8)}" class="t">${ln}</text>`).join('');
-    const infoSvg = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${targetWidth}" height="${infoHeight}">\n  <rect width="100%" height="100%" fill="#ffffff"/>\n  <style>.t{font-family: Arial, Helvetica, sans-serif; font-size: ${fontSize}px; fill: #000000;}</style>\n  ${svgLines}\n</svg>`;
-    const infoPng = await sharp(Buffer.from(infoSvg)).png().toBuffer();
+    // 1. Product placeholder
+    const productImage = await sharp({
+      create: {
+        width: width,
+        height: productHeight,
+        channels: 3,
+        background: '#e8e8e8'
+      }
+    }).png().toBuffer();
 
-    // Resize barcode
-    const barcodeResized = await sharp(barcodePng).resize({ width: targetWidth }).png().toBuffer();
-    const barMeta = await sharp(barcodeResized).metadata();
+    console.log('✅ Product placeholder created');
 
-    const totalHeight = prodMeta.height + infoHeight + barMeta.height;
+    // 2. Resize barcode
+    const barcodeResized = await sharp(barcodePng)
+      .resize(width - 40, null, { withoutEnlargement: true })
+      .png()
+      .toBuffer();
+
+    console.log('✅ Barcode resized');
+
+    // 3. Info SVG dengan layout baru
+    const infoSvg = `
+      <svg width="${width}" height="${infoHeight}" xmlns="http://www.w3.org/2000/svg">
+        <rect width="${width}" height="${infoHeight}" fill="#ffffff" stroke="#000" stroke-width="2"/>
+        <text x="20" y="50" font-size="36" font-weight="bold" fill="#000000">PLU: ${esc(plu)}</text>
+        <text x="20" y="100" font-size="28" fill="#333333">${esc(nama)}</text>
+        <text x="20" y="145" font-size="20" fill="#666666">Barcode: ${esc(codeToRender)}</text>
+        <text x="20" y="185" font-size="18" fill="#999999">Scan barcode untuk checkout</text>
+      </svg>
+    `;
+
+    const infoPng = await sharp(Buffer.from(infoSvg))
+      .png()
+      .toBuffer();
+
+    console.log('✅ Info SVG created');
 
     const finalImageBuffer = await sharp({ create: { width: targetWidth, height: totalHeight, channels: 3, background: '#ffffff' } })
       .composite([
