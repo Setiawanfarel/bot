@@ -1,4 +1,4 @@
-const { Client, MessageMedia } = require('whatsapp-web.js');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 const path = require('path');
@@ -11,6 +11,9 @@ const sqlite3 = require('sqlite3').verbose();
 const dbPath = path.join(__dirname, 'barcode.db');
 let db = null;
 
+// In-memory product cache (LRU-like, simple)
+const PRODUCT_CACHE_LIMIT = 2000;
+const productCache = new Map();
 // Initialize database
 function initializeDB() {
   return new Promise((resolve, reject) => {
@@ -19,7 +22,13 @@ function initializeDB() {
         console.error('❌ Database error:', err);
         reject(err);
       } else {
-        console.log('✅ Database connected');
+        // Ensure useful indexes exist to make lookups by PLU/barcode fast
+        db.serialize(() => {
+          db.run('CREATE INDEX IF NOT EXISTS idx_products_plu ON products(plu)');
+          db.run('CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode)');
+        });
+
+        console.log('✅ Database connected (indexes ensured)');
         resolve();
       }
     });
@@ -33,10 +42,17 @@ function queryDB(sql, params = []) {
       reject(new Error('Database not initialized'));
       return;
     }
-    
+    const start = Date.now();
     db.get(sql, params, (err, row) => {
-      if (err) reject(err);
-      else resolve(row);
+      const elapsed = Date.now() - start;
+      if (err) {
+        console.error(`❌ DB error (${elapsed}ms):`, err);
+        reject(err);
+      } else {
+        // minimal timing log for slow queries
+        if (elapsed > 20) console.log(`⏱️  DB query ${sql} took ${elapsed}ms`);
+        resolve(row);
+      }
     });
   });
 }
@@ -45,24 +61,45 @@ function queryDB(sql, params = []) {
 const barcodeCache = new Map();
 const lastProductByChat = new Map();
 
-function findProductLocally(query) {
-  return new Promise(async (resolve) => {
-    try {
-      // Try PLU first
-      let product = await queryDB('SELECT * FROM products WHERE plu = ?', [query]);
-      if (product) {
-        resolve(product);
-        return;
-      }
-      
-      // Try barcode
-      product = await queryDB('SELECT * FROM products WHERE barcode = ?', [query]);
-      resolve(product || null);
-    } catch (err) {
-      console.error('❌ DB query error:', err);
-      resolve(null);
+async function findProductLocally(query) {
+  try {
+    const key = String(query || '').trim();
+    if (!key) return null;
+
+    // Check in-memory cache first
+    if (productCache.has(key)) {
+      // Move to newest (simple LRU behavior)
+      const cached = productCache.get(key);
+      productCache.delete(key);
+      productCache.set(key, cached);
+      // Very fast return
+      // console.log(`🔁 Cache hit for ${key}`);
+      return cached;
     }
-  });
+
+    const t0 = Date.now();
+    // Try PLU first
+    let product = await queryDB('SELECT * FROM products WHERE plu = ?', [key]);
+    if (!product) {
+      product = await queryDB('SELECT * FROM products WHERE barcode = ?', [key]);
+    }
+    const elapsed = Date.now() - t0;
+    if (elapsed > 10) console.log(`🔎 Lookup for ${key} took ${elapsed}ms`);
+
+    if (product) {
+      productCache.set(key, product);
+      // Evict oldest if needed
+      if (productCache.size > PRODUCT_CACHE_LIMIT) {
+        const oldestKey = productCache.keys().next().value;
+        productCache.delete(oldestKey);
+      }
+    }
+
+    return product || null;
+  } catch (err) {
+    console.error('❌ DB query error:', err);
+    return null;
+  }
 }
 
 function esc(s) {
@@ -415,9 +452,9 @@ async function sendBarcodeInfo(msg, product, client) {
   }
 }
 
-// Initialize client
+// Initialize client (use LocalAuth to persist session)
 const client = new Client({
-  session: 'whatsapp-session',
+  authStrategy: new LocalAuth({ clientId: 'whatsapp-bot' }),
   puppeteer: {
     headless: 'new',
     args: [
@@ -437,6 +474,14 @@ const client = new Client({
     ],
     executablePath: process.env.CHROME_PATH || '/usr/bin/chromium-browser'
   }
+});
+
+client.on('authenticated', (session) => {
+  console.log('🔐 Authenticated with WhatsApp');
+});
+
+client.on('auth_failure', (msg) => {
+  console.error('❌ Authentication failure:', msg);
 });
 
 client.on('qr', (qr) => {
@@ -462,6 +507,9 @@ client.on('message', async (msg) => {
         await client.sendMessage(msg.from, 'Format: .plu <plu1> <plu2> ...');
         return;
       }
+
+      // Send quick acknowledgement so user sees bot is processing
+      await client.sendMessage(msg.from, '⏳ Mencari beberapa PLU...');
 
       const results = [];
       for (const plu of pluList) {
@@ -511,6 +559,7 @@ client.on('message', async (msg) => {
     }
 
     // Default: search lokal
+    await client.sendMessage(msg.from, '⏳ Mencari produk...');
     const product = await findProductLocally(userMessage);
     if (product) {
       await sendBarcodeInfo(msg, product, client);
