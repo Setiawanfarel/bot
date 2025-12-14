@@ -15,20 +15,33 @@ const fetchFunc = (...args) => {
 // URL API dari environment variables
 const API_URL = process.env.API_URL || 'https://idmhelp.vercel.app/api/search?q=';
 
-// Load barcode data lokal
+// Load barcode data lokal and build indexed maps for O(1) lookup
 let barcodeData = [];
+let pluMap = new Map();  // PLU -> product
+let barcodeMap = new Map();  // barcode -> product
 try {
   const dataPath = path.join(__dirname, 'barcodesheet.json');
   barcodeData = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
+  // Build index maps
+  barcodeData.forEach(item => {
+    if (item.plu) pluMap.set(item.plu, item);
+    if (item.barcode) barcodeMap.set(item.barcode, item);
+  });
   console.log(`✅ Loaded ${barcodeData.length} local barcode records`);
 } catch (error) {
   console.error('❌ Error loading barcodesheet.json:', error);
 }
 
+// Barcode cache: bcid+text -> buffer
+const barcodeCache = new Map();
+
 // Keep last requested product per chat to support .bulk without repeating PLU
 const lastProductByChat = new Map();
-// Track chats waiting for a qty input (after product lookup)
-const awaitingQtyByChat = new Map();
+
+// Helper: Fast lookup by PLU or barcode
+function findProductLocally(query) {
+  return pluMap.get(query) || barcodeMap.get(query) || null;
+}
 
 // Fungsi untuk mengambil data dari API
 async function fetchProductFromAPI(query) {
@@ -55,6 +68,7 @@ function esc(s) {
 }
 
 // Create combined image: product image (top), info block, barcode (bottom)
+// OPTIMIZED: parallel fetch + caching
 async function createCombinedImage(product, options = {}) {
   const targetWidth = options.targetWidth || 1000;
   const sidePadding = options.sidePadding || 60;
@@ -68,73 +82,128 @@ async function createCombinedImage(product, options = {}) {
 
   const codeToRender = (barcode && barcode.trim() !== '') ? barcode : plu;
 
-  // generate barcode
+  // Determine barcode type
   const isDigits = /^\d+$/.test(codeToRender);
   let bcid = 'code128';
   if (isDigits && codeToRender.length === 13) bcid = 'ean13';
   else if (isDigits && codeToRender.length === 12) bcid = 'upca';
 
-  const barcodePng = await bwipjs.toBuffer({
-    bcid,
-    text: codeToRender,
-    scale: barcodeScale,
-    height: barcodeHeight,
-    includetext: true,
-    textxalign: 'center'
-  });
-
-  // product image buffer
-  let prodBuf = null;
-  if (gambar) {
-    try {
-      const res = await fetchFunc(gambar, { timeout: 10000 });
-      if (res && res.ok) {
-        // node-fetch Response has buffer(), global fetch uses arrayBuffer
-        if (typeof res.arrayBuffer === 'function') {
-          const ab = await res.arrayBuffer();
-          prodBuf = Buffer.from(ab);
-        } else if (typeof res.buffer === 'function') {
-          prodBuf = await res.buffer();
+  // Check cache first
+  const cacheKey = `${bcid}:${codeToRender}`;
+  let barcodePng = barcodeCache.get(cacheKey);
+  
+  // Parallel: fetch image + generate barcode (if not cached)
+  const [prodBuf] = await Promise.all([
+    // Fetch product image with timeout and fallback
+    (async () => {
+      if (!gambar || gambar.trim() === '') {
+        console.log('⚠️ No image URL provided, using blank fallback');
+        return null;
+      }
+      try {
+        const res = await fetchFunc(gambar, { timeout: 8000 });
+        if (res && res.ok) {
+          if (typeof res.arrayBuffer === 'function') {
+            const ab = await res.arrayBuffer();
+            return Buffer.from(ab);
+          } else if (typeof res.buffer === 'function') {
+            return await res.buffer();
+          }
+        } else {
+          console.log(`⚠️ Image fetch failed with status ${res && res.status}`);
+          return null;
+        }
+      } catch (e) {
+        console.log(`⚠️ Image fetch error: ${e && e.message}`);
+        return null;
+      }
+    })(),
+    
+    // Generate barcode (or use cache)
+    (async () => {
+      if (!barcodePng) {
+        try {
+          barcodePng = await bwipjs.toBuffer({
+            bcid,
+            text: codeToRender,
+            scale: barcodeScale,
+            height: barcodeHeight,
+            includetext: true,
+            textxalign: 'center'
+          });
+          // Cache it
+          barcodeCache.set(cacheKey, barcodePng);
+        } catch (e) {
+          console.error('❌ Barcode generation failed:', e);
+          throw new Error(`Barcode generation error: ${e.message}`);
         }
       }
+    })()
+  ]);
+
+  // Resize product image OR create blank fallback
+  let prodResized;
+  let prodMeta = { width: targetWidth, height: 500 };  // default dimensions
+  
+  if (prodBuf) {
+    try {
+      const meta = await sharp(prodBuf).metadata();
+      const aspectRatio = meta.width / meta.height;
+      const resizedHeight = Math.round(targetWidth / aspectRatio);
+      prodResized = await sharp(prodBuf)
+        .resize(targetWidth, resizedHeight, { fit: 'cover', withoutEnlargement: true })
+        .png()
+        .toBuffer();
+      prodMeta = { width: targetWidth, height: resizedHeight };
+      console.log(`✅ Image resized to ${targetWidth}x${resizedHeight}`);
     } catch (e) {
-      console.log('⚠️ Could not fetch product image:', e && (e.message || e));
-      prodBuf = null;
+      console.warn(`⚠️ Image processing failed, using blank: ${e.message}`);
+      prodResized = await sharp({ 
+        create: { width: targetWidth, height: 500, channels: 3, background: '#f0f0f0' } 
+      }).png().toBuffer();
+      prodMeta = { width: targetWidth, height: 500 };
     }
+  } else {
+    // Create blank image with light gray background
+    prodResized = await sharp({ 
+      create: { width: targetWidth, height: 500, channels: 3, background: '#f0f0f0' } 
+    }).png().toBuffer();
+    prodMeta = { width: targetWidth, height: 500 };
   }
-  if (!prodBuf) {
-    prodBuf = await sharp({ create: { width: targetWidth, height: 600, channels: 3, background: '#ffffff' } }).png().toBuffer();
-  }
 
-  const prodResized = await sharp(prodBuf).resize({ width: targetWidth }).png().toBuffer();
-  const prodMeta = await sharp(prodResized).metadata();
-
-  // info SVG block
-  const lines = [nama, `PLU: ${plu}`];
-  const fontSize = 36;
-  const lineHeight = Math.round(fontSize * 1.4);
-  const padding = 20;
-  const infoHeight = padding * 2 + lineHeight * lines.length;
-  const svgLines = lines.map((ln, i) => `<text x="${padding}" y="${padding + lineHeight * (i + 0.8)}" class="t">${esc(ln)}</text>`).join('');
-  const infoSvg = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${targetWidth}" height="${infoHeight}">\n  <rect width="100%" height="100%" fill="#ffffff"/>\n  <style>.t{font-family: Arial, Helvetica, sans-serif; font-size: ${fontSize}px; fill: #000000;}</style>\n  ${svgLines}\n</svg>`;
-  const infoPng = await sharp(Buffer.from(infoSvg)).png().toBuffer();
-
-  // barcode resize with side padding
-  const barcodeWidth = Math.max(200, targetWidth - sidePadding * 2);
-  const barcodeResized = await sharp(barcodePng).resize({ width: barcodeWidth }).png().toBuffer();
-  const barMeta = await sharp(barcodeResized).metadata();
-
-  const totalHeight = prodMeta.height + infoHeight + barMeta.height;
-  const finalImageBuffer = await sharp({ create: { width: targetWidth, height: totalHeight, channels: 3, background: '#ffffff' } })
-    .composite([
-      { input: prodResized, top: 0, left: 0 },
-      { input: infoPng, top: prodMeta.height, left: 0 },
-      { input: barcodeResized, top: prodMeta.height + infoHeight, left: sidePadding }
-    ])
+  // Resize barcode
+  const barcodeResized = await sharp(barcodePng)
+    .resize(targetWidth - 2 * sidePadding, null, { withoutEnlargement: true })
     .png()
     .toBuffer();
+  const barcodeMeta = await sharp(barcodeResized).metadata();
 
-  return finalImageBuffer;
+  // Create info SVG
+  const infoWidth = targetWidth;
+  const infoHeight = 120;
+  const infoSvg = `
+    <svg width="${infoWidth}" height="${infoHeight}" xmlns="http://www.w3.org/2000/svg">
+      <rect width="${infoWidth}" height="${infoHeight}" fill="#ffffff" stroke="#cccccc" stroke-width="1"/>
+      <text x="10" y="30" font-size="18" font-weight="bold" fill="#000000">PLU: ${esc(plu)}</text>
+      <text x="10" y="60" font-size="14" fill="#333333">Nama: ${esc(nama)}</text>
+      <text x="10" y="90" font-size="12" fill="#666666">Barcode: ${esc(codeToRender)}</text>
+    </svg>
+  `;
+  const infoPng = await sharp(Buffer.from(infoSvg)).png().toBuffer();
+
+  // Final composite
+  const labelHeight = prodMeta.height + infoHeight + barcodeMeta.height + 40;
+  const canvas = sharp({ 
+    create: { width: targetWidth, height: labelHeight, channels: 3, background: '#ffffff' } 
+  });
+
+  const composite = await canvas.composite([
+    { input: prodResized, top: 0, left: 0 },
+    { input: infoPng, top: prodMeta.height, left: 0 },
+    { input: barcodeResized, top: prodMeta.height + infoHeight + 20, left: sidePadding }
+  ]).png().toBuffer();
+
+  return composite;
 }
 
 // Generate a bulk image composed of `qty` small labels stacked vertically
@@ -149,63 +218,99 @@ async function generateBulkImage(product, qty) {
   const barcodeScale = 2;
   const barcodeHeight = 15;
 
-  // prepare product buffer once
-  let prodBuf = null;
-  const gambar = product.imageUrl || product.gambar || '';
-  if (gambar) {
-    try {
-      const res = await fetchFunc(gambar, { timeout: 10000 });
-      if (res && res.ok) {
-        if (typeof res.arrayBuffer === 'function') {
-          const ab = await res.arrayBuffer();
-          prodBuf = Buffer.from(ab);
-        } else if (typeof res.buffer === 'function') {
-          prodBuf = await res.buffer();
-        }
-      }
-    } catch (e) {
-      prodBuf = null;
-    }
-  }
-  if (!prodBuf) prodBuf = await sharp({ create: { width: labelWidth, height: productHeight, channels: 3, background: '#ffffff' } }).png().toBuffer();
-
-  const prodResized = await sharp(prodBuf).resize({ width: labelWidth }).png().toBuffer();
-  const prodMeta = await sharp(prodResized).metadata();
-
-  // barcode image
+  // Parallel fetch image + prepare barcode
   const codeToRender = (product.barcode && product.barcode.trim() !== '') ? product.barcode : (product.plu || '000000');
   const isDigits = /^\d+$/.test(codeToRender);
   let bcid = 'code128';
   if (isDigits && codeToRender.length === 13) bcid = 'ean13';
   else if (isDigits && codeToRender.length === 12) bcid = 'upca';
 
-  const barcodePng = await bwipjs.toBuffer({ bcid, text: codeToRender, scale: barcodeScale, height: barcodeHeight, includetext: true, textxalign: 'center' });
+  const cacheKey = `${bcid}:${codeToRender}`;
+  let barcodePng = barcodeCache.get(cacheKey);
+
+  const gambar = product.imageUrl || product.gambar || '';
+  
+  // Parallel: fetch image + barcode generation
+  const [prodBuf] = await Promise.all([
+    (async () => {
+      if (!gambar || gambar.trim() === '') return null;
+      try {
+        const res = await fetchFunc(gambar, { timeout: 8000 });
+        if (res && res.ok) {
+          if (typeof res.arrayBuffer === 'function') {
+            const ab = await res.arrayBuffer();
+            return Buffer.from(ab);
+          } else if (typeof res.buffer === 'function') {
+            return await res.buffer();
+          }
+        }
+      } catch (e) {
+        console.log(`⚠️ Bulk image fetch error: ${e.message}`);
+      }
+      return null;
+    })(),
+    
+    (async () => {
+      if (!barcodePng) {
+        try {
+          barcodePng = await bwipjs.toBuffer({
+            bcid, text: codeToRender, scale: barcodeScale, height: barcodeHeight, includetext: true, textxalign: 'center'
+          });
+          barcodeCache.set(cacheKey, barcodePng);
+        } catch (e) {
+          console.error('❌ Barcode gen error:', e);
+        }
+      }
+    })()
+  ]);
+
+  // Resize product image
+  let prodResized;
+  let prodMeta = { width: labelWidth, height: productHeight };
+  
+  if (prodBuf) {
+    try {
+      const meta = await sharp(prodBuf).metadata();
+      const aspectRatio = meta.width / meta.height;
+      const resizedHeight = Math.round(labelWidth / aspectRatio);
+      prodResized = await sharp(prodBuf).resize(labelWidth, resizedHeight, { fit: 'cover' }).png().toBuffer();
+      prodMeta = { width: labelWidth, height: resizedHeight };
+    } catch (e) {
+      console.warn(`⚠️ Bulk image processing error, using blank`);
+      prodResized = await sharp({ create: { width: labelWidth, height: productHeight, channels: 3, background: '#f0f0f0' } }).png().toBuffer();
+    }
+  } else {
+    prodResized = await sharp({ create: { width: labelWidth, height: productHeight, channels: 3, background: '#f0f0f0' } }).png().toBuffer();
+  }
+
+  // Resize barcode
   const barcodeWidth = Math.max(150, labelWidth - sidePadding * 2);
-  const barcodeResized = await sharp(barcodePng).resize({ width: barcodeWidth }).png().toBuffer();
+  const barcodeResized = await sharp(barcodePng).resize(barcodeWidth, null, { withoutEnlargement: true }).png().toBuffer();
   const barMeta = await sharp(barcodeResized).metadata();
 
-  // info svg for label
+  // Info SVG for label
   const nama = product.productName || product.nama || 'Nama Tidak Tersedia';
   const plu = product.plu || '';
-  const fontSize = 24;
-  const lineHeight = Math.round(fontSize * 1.4);
-  const padding = 10;
-  const lines = [nama, `PLU: ${plu}`];
-  const infoHeight = padding * 2 + lineHeight * lines.length;
-  const svgLines = lines.map((ln, i) => `<text x="${padding}" y="${padding + lineHeight * (i + 0.8)}" class="t">${esc(ln)}</text>`).join('');
-  const infoSvg = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${labelWidth}" height="${infoHeight}">\n  <rect width="100%" height="100%" fill="#ffffff"/>\n  <style>.t{font-family: Arial, Helvetica, sans-serif; font-size: ${fontSize}px; fill: #000000;}</style>\n  ${svgLines}\n</svg>`;
+  const infoHeight = 60;
+  const infoSvg = `
+    <svg width="${labelWidth}" height="${infoHeight}" xmlns="http://www.w3.org/2000/svg">
+      <rect width="${labelWidth}" height="${infoHeight}" fill="#ffffff" stroke="#ccc" stroke-width="1"/>
+      <text x="10" y="20" font-size="14" font-weight="bold" fill="#000">${esc(nama)}</text>
+      <text x="10" y="40" font-size="12" fill="#333">PLU: ${esc(plu)}</text>
+    </svg>
+  `;
   const infoPng = await sharp(Buffer.from(infoSvg)).png().toBuffer();
 
-  const labelHeight = prodMeta.height + infoHeight + barMeta.height;
-
+  const labelHeight = prodMeta.height + infoHeight + barMeta.height + 15;
   const totalHeight = labelHeight * qty;
   const canvas = sharp({ create: { width: labelWidth, height: totalHeight, channels: 3, background: '#ffffff' } });
+  
   const composites = [];
   for (let i = 0; i < qty; i++) {
     const top = i * labelHeight;
     composites.push({ input: prodResized, top: top, left: 0 });
     composites.push({ input: infoPng, top: top + prodMeta.height, left: 0 });
-    composites.push({ input: barcodeResized, top: top + prodMeta.height + infoHeight, left: sidePadding });
+    composites.push({ input: barcodeResized, top: top + prodMeta.height + infoHeight + 10, left: sidePadding });
   }
 
   const final = await canvas.composite(composites).png().toBuffer();
@@ -223,9 +328,6 @@ async function sendProductInfo(msg, product, client) {
 
     // store last product for bulk convenience
     lastProductByChat.set(msg.from, product);
-    // ask user for qty input for bulk convenience
-    awaitingQtyByChat.set(msg.from, product);
-    await client.sendMessage(msg.from, 'Jika ingin membuat banyak label untuk produk ini, kirimkan jumlah (angka), atau gunakan perintah: .bulk <qty>. Maksimum 50.');
   } catch (err) {
     console.error('❌ Error creating/sending combined image:', err);
     await client.sendMessage(msg.from, '⚠️ Terjadi kesalahan saat membuat gambar produk/barcode. Silakan coba lagi.');
@@ -274,37 +376,24 @@ client.on('message', async (msg) => {
   try {
     const userMessage = msg.body.trim();
 
-    // If the bot is awaiting a qty for this chat and the user replies with a number, handle it
-    if (/^\d+$/.test(userMessage) && awaitingQtyByChat.has(msg.from)) {
-      const qty = parseInt(userMessage, 10);
-      const product = awaitingQtyByChat.get(msg.from);
-      // clear awaiting state regardless
-      awaitingQtyByChat.delete(msg.from);
-
-      if (!product) {
-        await client.sendMessage(msg.from, 'Produk tidak ditemukan. Silakan cari produk terlebih dahulu.');
-        return;
-      }
-      if (!qty || qty <= 0) {
-        await client.sendMessage(msg.from, 'Jumlah tidak valid. Masukkan angka > 0.');
-        return;
-      }
-      if (qty > 50) {
-        await client.sendMessage(msg.from, 'Maaf, jumlah maksimal saat ini adalah 50. Gunakan nilai lebih kecil atau gunakan .bulk dengan opsi lain.');
+    // .plu command: search multiple PLU separated by space
+    if (userMessage.toLowerCase().startsWith('.plu')) {
+      const pluList = userMessage.substring(4).trim().split(/\s+/);
+      if (pluList.length === 0 || !pluList[0]) {
+        await client.sendMessage(msg.from, 'Format: .plu <PLU1> <PLU2> <PLU3> ...\\nContoh: .plu 10000019 10000020 10000021');
         return;
       }
 
-      await client.sendMessage(msg.from, `Membuat ${qty} label untuk produk: ${product.productName || product.nama || product.plu} ...`);
-      try {
-        const bulkBuffer = await generateBulkImage(product, qty);
-        const media = new MessageMedia('image/png', bulkBuffer.toString('base64'), `bulk-${product.plu || 'no-plu'}-${qty}.png`);
-        await client.sendMessage(msg.from, media, { caption: `Bulk ${qty} x ${product.productName || product.nama || product.plu}` });
-        // store last product
-        lastProductByChat.set(msg.from, product);
-      } catch (err) {
-        console.error('❌ Error generating bulk image:', err);
-        await client.sendMessage(msg.from, 'Terjadi kesalahan saat membuat bulk image. Coba lagi nanti.');
+      const results = [];
+      for (const plu of pluList) {
+        const product = findProductLocally(plu);
+        if (product) {
+          results.push(`✅ ${plu}: ${product.productName || product.nama}`);
+        } else {
+          results.push(`❌ ${plu}: Tidak ditemukan`);
+        }
       }
+      await client.sendMessage(msg.from, `*Hasil Pencarian Multiple PLU:*\n\n${results.join('\n')}`);
       return;
     }
 
@@ -340,7 +429,8 @@ client.on('message', async (msg) => {
       let product = null;
       const codeArg = parts[1];
       if (codeArg) {
-        product = barcodeData.find(item => item.plu === codeArg || item.barcode === codeArg);
+        // Use fast map lookup instead of find
+        product = findProductLocally(codeArg);
         if (!product) product = await fetchProductFromAPI(codeArg);
       } else {
         product = lastProductByChat.get(msg.from) || null;
@@ -364,8 +454,8 @@ client.on('message', async (msg) => {
       return;
     }
 
-    // Default: search local dataset by PLU or barcode
-    const product = barcodeData.find(item => item.plu === userMessage || item.barcode === userMessage);
+    // Default: search local dataset by PLU or barcode (fast map lookup)
+    const product = findProductLocally(userMessage);
     if (product) {
       await sendProductInfo(msg, product, client);
     } else {
