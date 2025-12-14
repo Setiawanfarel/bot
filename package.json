@@ -1,0 +1,28 @@
+{
+  "name": "whatsapp-barcode-bot",
+  "version": "1.0.0",
+  "description": "WhatsApp Bot untuk menampilkan info barcode (PLU, nama, gambar)",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "nodemon bot.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "barcode"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bwip-js": "^4.8.0",
+    "dotenv": "^16.6.1",
+    "node-fetch": "^2.7.0",
+    "qrcode-terminal": "^0.12.0",
+    "sharp": "^0.34.5",
+    "whatsapp-web.js": "^1.34.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
